@@ -15,5 +15,3 @@ img = Image.open('data/samples/bus.jpg')
 import numpy as np
 
 print(np.array(img).shape)
-
-print()
