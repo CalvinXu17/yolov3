@@ -2,28 +2,35 @@ from utils.google_utils import *
 from utils.layers import *
 from utils.parse_config import *
 
+
 ONNX_EXPORT = False
 
 
+"""
+    根据由cfg返回的嵌套多个dict的列表创建网络结构
+当遇到 [route] 和 [shortcut] 时，该层实际上相当于EmptyLayer层，仅仅做了一个线性映射，
+不同的地方在于送往下一层之前要做拼接或者短接，而这一点不用在模型结构中体现，在DarkNet的forward中可以看出来。
+    这里需要注意的是在定义nn.Conv2d时，bias = not bn，也就是说如果卷积层之后有bn层的话，卷积层没有偏置，否则有偏置。
+"""
 def create_modules(module_defs, img_size):
     # Constructs module list of layer blocks from module configuration in module_defs
 
     img_size = [img_size] * 2 if isinstance(img_size, int) else img_size  # expand if necessary
-    _ = module_defs.pop(0)  # cfg training hyperparams (unused)
-    output_filters = [3]  # input channels
-    module_list = nn.ModuleList()
+    _ = module_defs.pop(0)  # cfg 中训练的 hyperparams (未使用)，也就是cfg中的第一层[net]
+    output_filters = [3]  # 输入的通道，为3 RGB
+    module_list = nn.ModuleList()  # 创建一个list，其中存放的是module
     routs = []  # list of layers which rout to deeper layers
     yolo_index = -1
 
     for i, mdef in enumerate(module_defs):
-        modules = nn.Sequential()
+        modules = nn.Sequential()  # 根据不同的层进行设计放入Sequential中
 
-        if mdef['type'] == 'convolutional':
+        if mdef['type'] == 'convolutional':  # 卷积层
             bn = mdef['batch_normalize']
-            filters = mdef['filters']
-            k = mdef['size']  # kernel size
-            stride = mdef['stride'] if 'stride' in mdef else (mdef['stride_y'], mdef['stride_x'])
-            if isinstance(k, int):  # single-size conv
+            filters = mdef['filters']  # 卷积核数
+            k = mdef['size']  # kernel 大小
+            stride = mdef['stride'] if 'stride' in mdef else (mdef['stride_y'], mdef['stride_x'])  # 一个或两个方向的stride步长
+            if isinstance(k, int):  # kernel size只是一个数字，即长宽相同的卷积核
                 modules.add_module('Conv2d', nn.Conv2d(in_channels=output_filters[-1],
                                                        out_channels=filters,
                                                        kernel_size=k,
@@ -31,14 +38,14 @@ def create_modules(module_defs, img_size):
                                                        padding=k // 2 if mdef['pad'] else 0,
                                                        groups=mdef['groups'] if 'groups' in mdef else 1,
                                                        bias=not bn))
-            else:  # multiple-size conv
+            else:  # 多尺度的卷积核 conv
                 modules.add_module('MixConv2d', MixConv2d(in_ch=output_filters[-1],
                                                           out_ch=filters,
                                                           k=k,
                                                           stride=stride,
                                                           bias=not bn))
 
-            if bn:
+            if bn:  # 若需要归一化
                 modules.add_module('BatchNorm2d', nn.BatchNorm2d(filters, momentum=0.03, eps=1E-4))
             else:
                 routs.append(i)  # detection output (goes into yolo layer)
@@ -58,6 +65,7 @@ def create_modules(module_defs, img_size):
                 modules.running_mean = torch.tensor([0.485, 0.456, 0.406])
                 modules.running_var = torch.tensor([0.0524, 0.0502, 0.0506])
 
+        # 最大池化模块
         elif mdef['type'] == 'maxpool':
             k = mdef['size']  # kernel size
             stride = mdef['stride']
@@ -68,21 +76,29 @@ def create_modules(module_defs, img_size):
             else:
                 modules = maxpool
 
+        # 双线性上采样模块
         elif mdef['type'] == 'upsample':
             if ONNX_EXPORT:  # explicitly state size, avoid scale_factor
                 g = (yolo_index + 1) * 2 / 32  # gain
                 modules = nn.Upsample(size=tuple(int(x * g) for x in img_size))  # img_size = (320, 192)
             else:
-                modules = nn.Upsample(scale_factor=mdef['stride'])
+                modules = nn.Upsample(scale_factor=mdef['stride'])  # 上采样后的尺寸为原来的stride倍
 
-        elif mdef['type'] == 'route':  # nn.Sequential() placeholder for 'route' layer
+        elif mdef['type'] == 'route':  # 路由层 nn.Sequential() placeholder for 'route' layer
+            """
+            它的参数 layers 有一个或两个值。当只有一个值时，它输出这一层通过该值索引的特征图。
+            例如为-4，当前层级将输出路由层之前第四个层的特征图。
+
+            当层级有两个值时，它将返回由这两个值索引的拼接特征图。
+            例如为-1 和 61，该层级将输出从前一层级（-1）到第 61 层的特征图，并将它们按深度拼接。
+            """
             layers = mdef['layers']
             filters = sum([output_filters[l + 1 if l > 0 else l] for l in layers])
             routs.extend([i + l if l < 0 else l for l in layers])
-            modules = FeatureConcat(layers=layers)
+            modules = FeatureConcat(layers=layers)  # 该方法实现了一个layer直接返回，多个则在channel处concat
 
-        elif mdef['type'] == 'shortcut':  # nn.Sequential() placeholder for 'shortcut' layer
-            layers = mdef['from']
+        elif mdef['type'] == 'shortcut':  # 跳转连接，即残差网络层 nn.Sequential() placeholder for 'shortcut' layer
+            layers = mdef['from']  # from 为-3 表明该层的输出为前一层的输出加上前三层的输出（要求维度相同，两组输出直接相加）
             filters = output_filters[-1]
             routs.extend([i + l if l < 0 else l for l in layers])
             modules = WeightedFeatureFusion(layers=layers, weight='weights_type' in mdef)
@@ -117,9 +133,9 @@ def create_modules(module_defs, img_size):
 
         # Register module list and number of output filters
         module_list.append(modules)
-        output_filters.append(filters)
+        output_filters.append(filters)  # 每一层输出的维度都存起来，看不懂，后面都没用到这个
 
-    routs_binary = [False] * (i + 1)
+    routs_binary = [False] * (i + 1)  # 标记哪个索引处为route路由层
     for i in routs:
         routs_binary[i] = True
     return module_list, routs_binary
@@ -157,6 +173,7 @@ class YOLOLayer(nn.Module):
             self.anchor_vec = self.anchor_vec.to(device)
             self.anchor_wh = self.anchor_wh.to(device)
 
+    # p的维度为 [batch_size, C_out, H, W] 注意维度是先H后W
     def forward(self, p, out):
         ASFF = False  # https://arxiv.org/abs/1911.09516
         if ASFF:
@@ -185,6 +202,7 @@ class YOLOLayer(nn.Module):
             if (self.nx, self.ny) != (nx, ny):
                 self.create_grids((nx, ny), p.device)
 
+        # 将p reshape
         # p.view(bs, 255, 13, 13) -- > (bs, 3, 13, 13, 85)  # (bs, anchors, grid, grid, classes + xywh)
         p = p.view(bs, self.na, self.no, self.ny, self.nx).permute(0, 1, 3, 4, 2).contiguous()  # prediction
 
