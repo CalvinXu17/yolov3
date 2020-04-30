@@ -1,20 +1,10 @@
+import torch
+from models import Darknet
 
+net = Darknet('./cfg/yolov4', (602, 602))
+x = torch.zeros([1, 3, 602, 602])
 
-import cv2
+pre = net(x)
 
-from PIL import Image
-
-
-
-img = cv2.imread('data/samples/bus.jpg')
-
-print(img.shape)
-
-img = Image.open('data/samples/bus.jpg')
-
-import numpy as np
-
-print(np.array(img).shape)
-
-a = [1, 2, 3]
-print(a.pop(0))
+for i in pre:
+    print(i.shape)

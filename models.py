@@ -90,7 +90,8 @@ def create_modules(module_defs, img_size):
             例如为-4，当前层级将输出路由层之前第四个层的特征图。
 
             当层级有两个值时，它将返回由这两个值索引的拼接特征图。
-            例如为-1 和 61，该层级将输出从前一层级（-1）到第 61 层的特征图，并将它们按深度拼接。
+            例如为-1 和 61，该层级将输出从前一层级（-1）与第 61 层的特征图，并将它们按channel拼接。
+            [BS, 50, H, W]+[BS, 20, H, W]=[BS, 70, H, W]
             """
             layers = mdef['layers']
             filters = sum([output_filters[l + 1 if l > 0 else l] for l in layers])
@@ -133,7 +134,7 @@ def create_modules(module_defs, img_size):
 
         # Register module list and number of output filters
         module_list.append(modules)
-        output_filters.append(filters)  # 每一层输出的维度都存起来，看不懂，后面都没用到这个
+        output_filters.append(filters)  # 将当前层输出的channel存起来作为下一轮输入的channel
 
     routs_binary = [False] * (i + 1)  # 标记哪个索引处为route路由层
     for i in routs:
@@ -145,7 +146,7 @@ class YOLOLayer(nn.Module):
     def __init__(self, anchors, nc, img_size, yolo_index, layers, stride):
         super(YOLOLayer, self).__init__()
         self.anchors = torch.Tensor(anchors)
-        self.index = yolo_index  # index of this layer in layers
+        self.index = yolo_index  # 当前层在所有yolo层中的索引
         self.layers = layers  # model output layer indices
         self.stride = stride  # layer stride
         self.nl = len(layers)  # number of output layers (3)

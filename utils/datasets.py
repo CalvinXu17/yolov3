@@ -594,9 +594,15 @@ def load_mosaic(self, index):
     return img4, labels4
 
 
+"""
+处理图像使其为416 * 416，按长边比例缩放，空白处填0
+取min(w/img_w, h/img_h)这个比例来缩放，保证长的边缩放为需要的输入尺寸416
+而短边按比例缩放不会扭曲，img_w,img_h是原图尺寸768,576, 缩放后的尺寸为new_w, new_h=416,312
+"""
 def letterbox(img, new_shape=(416, 416), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True):
     # Resize image to a 32-pixel-multiple rectangle https://github.com/ultralytics/yolov3/issues/232
     shape = img.shape[:2]  # current shape [height, width]
+    # 按长边缩放，不足 new_shape * new_shape 的部分用128填充
     if isinstance(new_shape, int):
         new_shape = (new_shape, new_shape)
 
