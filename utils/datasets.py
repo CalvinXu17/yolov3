@@ -255,11 +255,21 @@ class LoadStreams:  # multiple IP or RTSP cameras
         return 0  # 1E12 frames = 32 streams at 30 FPS for 30 years
 
 
+"""
+原始图片的读取中调用了上面的letterbox函数，然后根据letterbox中的缩放系数以及填充情况对新图片标签中的x1y1x2y2做了修正
+接着利用xyxy2xywh函数将“左上角右下角表示bounding box”的方法转换为了“中心点和宽高表示”
+接着对x、y、w、h均除以了bounding box的宽做了归一化处理。
+这是为了之后训练时loss数值维度上的统一。
+可以看到的是之后在 训练过程中使用的真实标签中的w,h就是归一化之后的w和h
+而x,y则是通过gxy=(x,y)*ng, gxy -= gxy.floor() 来计算得到，这个在utils.py中的build_targets函数中可以看到。
+"""
 class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=416, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_labels=True, cache_images=False, single_cls=False):
         path = str(Path(path))  # os-agnostic
         assert os.path.isfile(path), 'File not found %s. See %s' % (path, help_url)
+
+        # img path like ../coco/images/train2017/000000109622.jpg in coco1.txt
         with open(path, 'r') as f:
             self.img_files = [x.replace('/', os.sep) for x in f.read().splitlines()  # os-agnostic
                               if os.path.splitext(x)[-1].lower() in img_formats]
@@ -279,6 +289,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.mosaic = self.augment and not self.rect  # load 4 images at a time into a mosaic (only during training)
 
         # Define labels
+        # 将self.img_files路径中的images文件夹替换为labels即为对应的label再将.jpg全部换成.txt作为标签path
         self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.txt')
                             for x in self.img_files]
 
@@ -432,6 +443,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             # Load labels
             labels = []
             x = self.labels[index]
+
+            # 由于对原始图片做了缩放，所以这里的label也要做相应处理
             if x is not None and x.size > 0:
                 # Normalized xywh to pixel xyxy format
                 labels = x.copy()
